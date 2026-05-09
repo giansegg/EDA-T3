@@ -2,9 +2,13 @@
 
 Integrantes:
 Gianpier Segovia Ureta
+
 José Ernesto Guerrero Cueva
 
-Implementación y comparación de:
+
+
+
+**Implementación y comparación de:**
 
 - **vEB-opt**: árbol binario de búsqueda estático con layout de van Emde Boas, búsqueda completamente inlined vía templates C++17.
 - **vEB-dyn**: misma estructura, búsqueda recursiva dinámica (versión original, sin optimizar).

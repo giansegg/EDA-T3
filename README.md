@@ -1,5 +1,9 @@
 # Cache-Oblivious BST vs Pointer BST
 
+Integrantes:
+Gianpier Segovia Ureta
+José Ernesto Guerrero Cueva
+
 Implementación y comparación de:
 
 - **vEB-opt**: árbol binario de búsqueda estático con layout de van Emde Boas, búsqueda completamente inlined vía templates C++17.

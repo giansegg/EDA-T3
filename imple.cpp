@@ -1,6 +1,3 @@
-// bench.cpp — vEB layout vs Pointer BST
-// g++ -O3 -march=native -std=c++17 -o bench bench.cpp
-
 #include <algorithm>
 #include <chrono>
 #include <climits>
@@ -9,208 +6,163 @@
 #include <numeric>
 #include <random>
 #include <vector>
-
 using namespace std;
 
-// ─── Pointer BST ─────────────────────────────────────────────────────────────
+struct Node { int32_t key; Node *l, *r; };
 
-struct Node { int32_t key; Node *left, *right; };
+static vector<Node> pool;
+static int ptr = 0;
 
-static vector<Node> bst_pool;
-static int          bst_pool_idx;
-
-static Node* bst_build(const vector<int32_t>& v, int lo, int hi) {
+Node* build_bst(const vector<int32_t>& v, int lo, int hi) {
     if (lo > hi) return nullptr;
-    int mid  = lo + (hi - lo) / 2;
-    Node* n  = &bst_pool[bst_pool_idx++];
-    n->key   = v[mid];
-    n->left  = bst_build(v, lo, mid - 1);
-    n->right = bst_build(v, mid + 1, hi);
+    int m = lo + (hi-lo)/2;
+    Node* n = &pool[ptr++];
+    n->key = v[m];
+    n->l = build_bst(v, lo, m-1);
+    n->r = build_bst(v, m+1, hi);
     return n;
 }
 
-static bool bst_find(const Node* r, int32_t k) {
+bool find_bst(const Node* r, int32_t k) {
     while (r) {
         if (k == r->key) return true;
-        r = k < r->key ? r->left : r->right;
+        r = k < r->key ? r->l : r->r;
     }
     return false;
 }
 
-// ─── vEB build ───────────────────────────────────────────────────────────────
-
-static int veb_build(int32_t* out, const int32_t* sorted, int h) {
+int build_veb(int32_t* out, const int32_t* s, int h) {
     if (h == 0) return 0;
-    if (h == 1) { *out = *sorted; return 1; }
-
-    const int top_h   = h / 2;
-    const int bot_h   = h - top_h;
-    const int num_top = (1 << top_h) - 1;
-    const int bot_sz  = (1 << bot_h) - 1;
-    const int stride  = bot_sz + 1;             // 2^bot_h
-    const int num_bot = 1 << top_h;
-
-    vector<int32_t> top(num_top);
-    for (int j = 0; j < num_top; j++)
-        top[j] = sorted[(size_t)j * stride + (stride - 1)]; // in-order medianas del top
-
-    int pos = veb_build(out, top.data(), top_h);
-    for (int k = 0; k < num_bot; k++)
-        pos += veb_build(out + pos, sorted + (size_t)k * stride, bot_h);
-    return pos;
+    if (h == 1) { *out = *s; return 1; }
+    int th = h/2, bh = h-th, step = 1<<bh;
+    vector<int32_t> top((1<<th)-1);
+    for (int j = 0; j < (int)top.size(); j++)
+        top[j] = s[(size_t)j*step + step-1];
+    int p = build_veb(out, top.data(), th);
+    for (int k = 0; k < (1<<th); k++)
+        p += build_veb(out+p, s+(size_t)k*step, bh);
+    return p;
 }
 
-// ─── vEB find — recursivo dinámico (baseline) ────────────────────────────────
-
-static bool veb_find_dyn(const int32_t* a, int h, int32_t key, int& gap) {
-    if (h == 0) { gap = 0; return false; }
-    if (h == 1) { gap = (key >= *a); return *a == key; }
-
-    const int top_h   = h / 2;
-    const int bot_h   = h - top_h;
-    const int num_top = (1 << top_h) - 1;
-    const int bot_sz  = (1 << bot_h) - 1;
-
-    int j;
-    if (veb_find_dyn(a, top_h, key, j)) return true;
-    int q;
-    bool found = veb_find_dyn(a + num_top + (size_t)j * bot_sz, bot_h, key, q);
-    gap = (j << bot_h) | q;
-    return found;
+bool veb_dyn(const int32_t* a, int h, int32_t k, int& g) {
+    if (h == 0) { g = 0; return false; }
+    if (h == 1) { g = (k >= *a); return *a == k; }
+    int th = h/2, bh = h-th, j, q;
+    if (veb_dyn(a, th, k, j)) return true;
+    bool f = veb_dyn(a + (1<<th)-1 + (size_t)j*((1<<bh)-1), bh, k, q);
+    g = (j<<bh)|q;
+    return f;
 }
-
-// ─── vEB find — template inlined, cero overhead de llamadas ──────────────────
 
 template<int H>
-[[gnu::always_inline]]
-static bool veb_find_t(const int32_t* a, int32_t key, int& gap) {
-    if constexpr (H == 0) {
-        gap = 0; return false;
-    } else if constexpr (H == 1) {
-        gap = (key >= *a);          // branchless
-        return *a == key;
-    } else {
-        constexpr int top_h   = H / 2;
-        constexpr int bot_h   = H - top_h;
-        constexpr int num_top = (1 << top_h) - 1;
-        constexpr int bot_sz  = (1 << bot_h) - 1;
-
-        int j;
-        if (veb_find_t<top_h>(a, key, j)) return true;
-        int q;
-        bool found = veb_find_t<bot_h>(a + num_top + (size_t)j * bot_sz, key, q);
-        gap = (j << bot_h) | q;
-        return found;
+[[gnu::always_inline]] bool find_fast(const int32_t* a, int32_t k, int& g) {
+    if constexpr (H == 0) { g = 0; return false; }
+    else if constexpr (H == 1) { g = (k >= *a); return *a == k; }
+    else {
+        constexpr int th = H/2, bh = H-th;
+        int j, q;
+        if (find_fast<th>(a, k, j)) return true;
+        bool f = find_fast<bh>(a + (1<<th)-1 + (size_t)j*((1<<bh)-1), k, q);
+        g = (j<<bh)|q;
+        return f;
     }
 }
-
-// ─── VEBTree ─────────────────────────────────────────────────────────────────
 
 struct VEBTree {
     vector<int32_t> data;
     int h = 0;
 
     void build(vector<int32_t> keys) {
-        h = 0;
-        while ((1 << h) - 1 < (int)keys.size()) ++h;
-        keys.resize((size_t)(1 << h) - 1, INT32_MAX); // relleno con centinela
+        while ((1<<h)-1 < (int)keys.size()) h++;
+        keys.resize((size_t)(1<<h)-1, INT32_MAX);
         data.resize(keys.size());
-        veb_build(data.data(), keys.data(), h);
+        build_veb(data.data(), keys.data(), h);
     }
 
     bool find_opt(int32_t k) const {
-        int gap;
-        switch (h) {                                   // dispatch estático por altura
-            case  1: return veb_find_t< 1>(data.data(), k, gap);
-            case  2: return veb_find_t< 2>(data.data(), k, gap);
-            case  3: return veb_find_t< 3>(data.data(), k, gap);
-            case  4: return veb_find_t< 4>(data.data(), k, gap);
-            case  5: return veb_find_t< 5>(data.data(), k, gap);
-            case  6: return veb_find_t< 6>(data.data(), k, gap);
-            case  7: return veb_find_t< 7>(data.data(), k, gap);
-            case  8: return veb_find_t< 8>(data.data(), k, gap);
-            case  9: return veb_find_t< 9>(data.data(), k, gap);
-            case 10: return veb_find_t<10>(data.data(), k, gap);
-            case 11: return veb_find_t<11>(data.data(), k, gap);
-            case 12: return veb_find_t<12>(data.data(), k, gap);
-            case 13: return veb_find_t<13>(data.data(), k, gap);
-            case 14: return veb_find_t<14>(data.data(), k, gap);
-            case 15: return veb_find_t<15>(data.data(), k, gap);
-            case 16: return veb_find_t<16>(data.data(), k, gap);
-            case 17: return veb_find_t<17>(data.data(), k, gap);
-            case 18: return veb_find_t<18>(data.data(), k, gap);
-            case 19: return veb_find_t<19>(data.data(), k, gap);
-            case 20: return veb_find_t<20>(data.data(), k, gap);
-            case 21: return veb_find_t<21>(data.data(), k, gap);
-            case 22: return veb_find_t<22>(data.data(), k, gap);
-            case 23: return veb_find_t<23>(data.data(), k, gap);
-            case 24: return veb_find_t<24>(data.data(), k, gap);
-            case 25: return veb_find_t<25>(data.data(), k, gap);
-            default: return veb_find_dyn(data.data(), h, k, gap);
+        int g;
+        switch (h) {
+            case  1: return find_fast< 1>(data.data(), k, g);
+            case  2: return find_fast< 2>(data.data(), k, g);
+            case  3: return find_fast< 3>(data.data(), k, g);
+            case  4: return find_fast< 4>(data.data(), k, g);
+            case  5: return find_fast< 5>(data.data(), k, g);
+            case  6: return find_fast< 6>(data.data(), k, g);
+            case  7: return find_fast< 7>(data.data(), k, g);
+            case  8: return find_fast< 8>(data.data(), k, g);
+            case  9: return find_fast< 9>(data.data(), k, g);
+            case 10: return find_fast<10>(data.data(), k, g);
+            case 11: return find_fast<11>(data.data(), k, g);
+            case 12: return find_fast<12>(data.data(), k, g);
+            case 13: return find_fast<13>(data.data(), k, g);
+            case 14: return find_fast<14>(data.data(), k, g);
+            case 15: return find_fast<15>(data.data(), k, g);
+            case 16: return find_fast<16>(data.data(), k, g);
+            case 17: return find_fast<17>(data.data(), k, g);
+            case 18: return find_fast<18>(data.data(), k, g);
+            case 19: return find_fast<19>(data.data(), k, g);
+            case 20: return find_fast<20>(data.data(), k, g);
+            case 21: return find_fast<21>(data.data(), k, g);
+            case 22: return find_fast<22>(data.data(), k, g);
+            case 23: return find_fast<23>(data.data(), k, g);
+            case 24: return find_fast<24>(data.data(), k, g);
+            case 25: return find_fast<25>(data.data(), k, g);
+            default: return veb_dyn(data.data(), h, k, g);
         }
     }
 
-    bool find_dyn(int32_t k) const {
-        int gap;
-        return veb_find_dyn(data.data(), h, k, gap);
+    bool find_slow(int32_t k) const {
+        int g;
+        return veb_dyn(data.data(), h, k, g);
     }
 };
 
-// ─── Benchmark ───────────────────────────────────────────────────────────────
-
 template<typename Fn>
-static double elapsed_ms(Fn fn) {
-    using Clock = chrono::high_resolution_clock;
-    auto t0 = Clock::now();
+double elapsed_ms(Fn fn) {
+    auto t0 = chrono::high_resolution_clock::now();
     fn();
-    return chrono::duration<double, milli>(Clock::now() - t0).count();
+    return chrono::duration<double, milli>(chrono::high_resolution_clock::now() - t0).count();
 }
 
 int main() {
-    constexpr int N = 20'000'000;
-    constexpr int Q =  1'000'000;
-    constexpr int T = 7;
+    const int N = 20000000, Q = 1000000, T = 7;
 
     mt19937 rng(42);
-    uniform_int_distribution<int32_t> dist(1, 10 * N);
+    uniform_int_distribution<int32_t> dist(1, 10*N);
 
     vector<int32_t> keys(N);
     for (auto& k : keys) k = dist(rng);
     sort(keys.begin(), keys.end());
     keys.erase(unique(keys.begin(), keys.end()), keys.end());
-    const int actual_N = (int)keys.size();
+    int actual_N = keys.size();
 
     vector<int32_t> queries(Q);
     for (auto& q : queries) q = dist(rng);
 
     printf("Building (N=%d)...\n", actual_N);
-
     VEBTree veb;
     veb.build(keys);
-    printf("  vEB: h=%d, %.0f MB\n", veb.h, veb.data.size() * 4.0 / 1e6);
+    printf("  vEB: h=%d, %.0f MB\n", veb.h, veb.data.size()*4.0/1e6);
 
-    bst_pool.resize(actual_N);
-    bst_pool_idx = 0;
-    Node* bst_root = bst_build(keys, 0, actual_N - 1);
-    printf("  BST: %.0f MB (pool)\n\n", actual_N * sizeof(Node) / 1e6);
+    pool.resize(actual_N); ptr = 0;
+    Node* root = build_bst(keys, 0, actual_N-1);
+    printf("  BST: %.0f MB (pool)\n\n", actual_N*sizeof(Node)/1e6);
 
     volatile int64_t sink = 0;
-
-    // warmup
     { int64_t s=0; for (int32_t q : queries) s += veb.find_opt(q); sink+=s; }
-    { int64_t s=0; for (int32_t q : queries) s += veb.find_dyn(q); sink+=s; }
-    { int64_t s=0; for (int32_t q : queries) s += bst_find(bst_root, q); sink+=s; }
+    { int64_t s=0; for (int32_t q : queries) s += veb.find_slow(q); sink+=s; }
+    { int64_t s=0; for (int32_t q : queries) s += find_bst(root, q); sink+=s; }
 
     vector<double> vo(T), vd(T), bt(T);
     for (int t = 0; t < T; t++) {
         int64_t sv=0, sd=0, sb=0;
         vo[t] = elapsed_ms([&]{ for (int32_t q : queries) sv += veb.find_opt(q); });
-        vd[t] = elapsed_ms([&]{ for (int32_t q : queries) sd += veb.find_dyn(q); });
-        bt[t] = elapsed_ms([&]{ for (int32_t q : queries) sb += bst_find(bst_root, q); });
-        sink += sv + sd + sb;
+        vd[t] = elapsed_ms([&]{ for (int32_t q : queries) sd += veb.find_slow(q); });
+        bt[t] = elapsed_ms([&]{ for (int32_t q : queries) sb += find_bst(root, q); });
+        sink += sv+sd+sb;
     }
 
-    auto avg  = [](const vector<double>& v){ return accumulate(v.begin(), v.end(), 0.0) / v.size(); };
+    auto avg  = [](const vector<double>& v){ return accumulate(v.begin(), v.end(), 0.0)/v.size(); };
     auto minv = [](const vector<double>& v){ return *min_element(v.begin(), v.end()); };
 
     printf("N=%d  Q=%d  T=%d\n\n", actual_N, Q, T);
